@@ -6,10 +6,12 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+
+	log_v1 "github.com/ahmedalsunbati712/proglog/api/v1"
 )
 
 type Log struct {
-	mu            sync.Mutex
+	mu            sync.RWMutex
 	Dir           string
 	c             Config
 	activeSegment *segment
@@ -49,9 +51,32 @@ func (l *Log) setup() error {
 	}
 
 	for _, offset := range offsets {
-		l.newSegment(offset)
+		if err := l.newSegment(offset); err != nil {
+			return err
+		}
 	}
-	return fmt.Errorf("Some placeholder")
+
+	if l.segments == nil {
+		if err := l.newSegment(l.c.Segment.InitialOffset); err != nil {
+			return nil
+		}
+
+	}
+	return nil
+}
+
+func (l *Log) Append(record *log_v1.Record) (uint64, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	off, err := l.activeSegment.Append(record)
+	if err != nil {
+		return 0, nil
+	}
+
+	if l.activeSegment.IsMaxed() {
+		err = l.newSegment(off + 1)
+	}
+	return off, err
 }
 
 func (l *Log) newSegment(offset uint64) error {
@@ -62,4 +87,20 @@ func (l *Log) newSegment(offset uint64) error {
 	l.activeSegment = segment
 	l.segments = append(l.segments, segment)
 	return nil
+}
+
+func (l *Log) Read(offset uint64) (*log_v1.Record, error) {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	var target_segment *segment
+	for _, segment := range l.segments {
+		if segment.baseOffset <= offset && offset < segment.nextOffset {
+			target_segment = segment
+			break
+		}
+	}
+	if target_segment == nil {
+		return nil, fmt.Errorf("Offset out of range: %d", offset)
+	}
+	return target_segment.Read(offset)
 }
